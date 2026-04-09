@@ -14,14 +14,13 @@ in float v_AO;
 in float v_FogFactor;
 in float v_NormalY;
 in float v_Depth;
+in float v_Lighting;
 
 out vec4 FragColor;
 
 uniform sampler2D u_Atlas;       // 256×256 texture (16×16 tiles, each 16px)
-uniform vec3      u_SunDir;      // normalised sun direction
 uniform vec3      u_SkyColor;    // horizon/fog blend target
 uniform vec3      u_SunColor;    // e.g. vec3(1.0, 0.95, 0.8) warm
-uniform float     u_Ambient;     // global ambient [0,1], e.g. 0.35
 uniform float     u_DayNight;    // 0=night, 1=full day
 
 // ── Atlas sampling ────────────────────────────────────────────────────────────
@@ -49,17 +48,10 @@ void main() {
     if (albedo.a < 0.1) discard;
 
     // ── Lighting ──────────────────────────────────────────────────────────────
-    // 1. Ambient
-    float ambient = u_Ambient * u_DayNight;
-    // Slight sky-light boost for upward-facing surfaces
-    float skyBoost = max(0.0, v_NormalY) * 0.15 * u_DayNight;
-
-    // 2. Vertex AO (already combines face-direction brightness)
-    float lightVal = (ambient + skyBoost) * v_AO;
-
-    // 3. Night minimum (moonlight)
+    // v_Lighting = diffuse + ambient (from vertex shader)
+    float skyBoost = max(0.0, v_NormalY) * 0.15;
+    float lightVal = (v_Lighting + skyBoost) * v_AO * u_DayNight;
     lightVal = max(lightVal, 0.05);
-
     vec3 litColor = albedo.rgb * u_SunColor * lightVal;
 
     // ── Fog blend ─────────────────────────────────────────────────────────────

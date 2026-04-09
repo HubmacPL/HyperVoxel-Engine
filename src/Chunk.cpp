@@ -138,18 +138,12 @@ void ChunkMesh::uploadToGPU() {
                  GL_STATIC_DRAW);
 
     // ── Vertex attribute layout ───────────────────────────────────────────────
-    // ChunkVertex (12 bytes):
-    //  [0] x       uint8   offset 0
-    //  [1] y_lo    uint8   offset 1
-    //  [2] y_hi    uint8   offset 2
-    //  [3] z       uint8   offset 3
-    //  [4] u       uint8   offset 4
-    //  [5] v       uint8   offset 5
-    //  [6] tileX   uint8   offset 6
-    //  [7] tileY   uint8   offset 7
-    //  [8] ao      uint8   offset 8
-    //  [9] normal  uint8   offset 9
-    // [10,11] pad  uint8×2 offset 10
+    // ChunkVertex (24 bytes):
+    //  [0]  x, y_lo, y_hi, z            (uint8 ×4)   offset 0
+    //  [4]  u, v, tileX, tileY          (uint8 ×4)   offset 4
+    //  [8]  ao                          (uint8)      offset 8
+    //  [9]  pad[3]                      (uint8 ×3)   offset 9
+    //  [12] normal                       (float ×3)   offset 12
 
     // Attribute 0: packed position (x, y_lo, y_hi, z) as uvec4
     glEnableVertexAttribArray(0);
@@ -161,9 +155,14 @@ void ChunkMesh::uploadToGPU() {
     glVertexAttribIPointer(1, 4, GL_UNSIGNED_BYTE, sizeof(ChunkVertex),
                            reinterpret_cast<void*>(4));
 
-    // Attribute 2: ao + normal as uvec2
+    // Attribute 2: normal (vec3 floats) at offset 12
     glEnableVertexAttribArray(2);
-    glVertexAttribIPointer(2, 2, GL_UNSIGNED_BYTE, sizeof(ChunkVertex),
+    glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(ChunkVertex),
+                          reinterpret_cast<void*>(12));
+
+    // Attribute 3: AO (single unsigned byte) at offset 8
+    glEnableVertexAttribArray(3);
+    glVertexAttribIPointer(3, 1, GL_UNSIGNED_BYTE, sizeof(ChunkVertex),
                            reinterpret_cast<void*>(8));
 
     glBindVertexArray(0);

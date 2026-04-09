@@ -3,8 +3,10 @@
 #include "Camera.h"
 #include "World.h"
 #include "Texture.h"
+#include "SkyRenderer.h"
 #include <GL/glew.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
 #include <algorithm>
 #include <vector>
 #include <iostream>
@@ -73,9 +75,12 @@ void Renderer::init() {
     }
 
     initialised_ = true;
+    // Sky renderer for sun/moon quads
+    skyRenderer_ = std::make_unique<SkyRenderer>();
+    skyRenderer_->init();
 }
 
-void Renderer::renderWorld(const World& world, const Camera& camera) {
+void Renderer::renderWorld(const World& world, const Camera& camera, float dt) {
     if (!initialised_) return;
 
     const float aspect = 16.f / 9.f;
@@ -85,6 +90,39 @@ void Renderer::renderWorld(const World& world, const Camera& camera) {
 
     Frustum frustum;
     frustum.update(vp);
+
+    // --- Day/night cycle (advance once per frame) ---
+    const float dayLength = 120.0f; // seconds per full day
+    dayTime_ += dt;
+    float phase = fmod(dayTime_, dayLength) / dayLength; // 0..1
+    float theta = phase * glm::pi<float>() * 2.0f;
+    // Sun moves in a vertical arc (X axis offset)
+    sunDir_ = glm::normalize(glm::vec3(cos(theta), sin(theta), 0.05f));
+    moonDir_ = -sunDir_;
+
+    // Day/night factor [0..1] from sun height
+    float sunY = glm::clamp(sunDir_.y, -1.0f, 1.0f);
+    float t = (sunY * 0.5f) + 0.5f; // map -1..1 -> 0..1
+    float dayNight = glm::clamp(t, 0.0f, 1.0f);
+
+    // Sky colour blending: night <-> dusk <-> day
+    const glm::vec3 dayColor(0.53f, 0.81f, 0.98f);
+    const glm::vec3 duskColor(1.0f, 0.45f, 0.5f);
+    const glm::vec3 nightColor(0.02f, 0.03f, 0.12f);
+    if (dayNight > 0.5f) {
+        float u = (dayNight - 0.5f) * 2.0f;
+        skyColor_ = glm::mix(duskColor, dayColor, u);
+    } else {
+        float u = dayNight * 2.0f;
+        skyColor_ = glm::mix(nightColor, duskColor, u);
+    }
+
+    // Clear to dynamic sky colour
+    glClearColor(skyColor_.r, skyColor_.g, skyColor_.b, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Render sun/moon quads first (no depth write/test inside)
+    if (skyRenderer_) skyRenderer_->render(camera, camera.position(), sunDir_, moonDir_, vp);
 
     int drawCalls = 0, visibleChunks = 0;
 
@@ -116,11 +154,12 @@ void Renderer::renderOpaquePass(const World& world,
 
     chunkShader_->setInt  ("u_Atlas",    0);
     chunkShader_->setMat4 ("u_MVP",      vp);
-    chunkShader_->setVec3 ("u_SunDir",   glm::normalize(glm::vec3(0.6f, 1.f, 0.3f)));
-    chunkShader_->setVec3 ("u_SkyColor", glm::vec3(0.53f, 0.81f, 0.98f));
+    chunkShader_->setVec3 ("u_SunDir",   glm::normalize(sunDir_));
+    chunkShader_->setVec3 ("u_SkyColor", skyColor_);
     chunkShader_->setVec3 ("u_SunColor", glm::vec3(1.0f, 0.95f, 0.8f));
     chunkShader_->setFloat("u_Ambient",  0.35f);
-    chunkShader_->setFloat("u_DayNight", 1.0f);
+    float dayNight = glm::clamp((sunDir_.y * 0.5f) + 0.5f, 0.0f, 1.0f);
+    chunkShader_->setFloat("u_DayNight", dayNight);
     chunkShader_->setFloat("u_FogStart", static_cast<float>(world.renderDistance()-2) * CHUNK_W);
     chunkShader_->setFloat("u_FogEnd",   static_cast<float>(world.renderDistance())   * CHUNK_W);
 

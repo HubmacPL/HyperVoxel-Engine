@@ -52,6 +52,7 @@ set(SOURCES
     src/ChunkManager.cpp
     src/TerrainGenerator.cpp
     src/Renderer.cpp
+    src/SkyRenderer.cpp
     src/Shader.cpp
     src/Texture.cpp
     src/TextureAtlas.cpp

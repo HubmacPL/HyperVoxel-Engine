@@ -50,10 +50,8 @@ public:
             camera_.setPosition(player_->eyePos());
 
             // ── Render ────────────────────────────────────────────────────────
-            glClearColor(0.53f, 0.81f, 0.98f, 1.f);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-            renderer_.renderWorld(world_, camera_);
+            // Renderer handles clear color (sky) and day/night now.
+            renderer_.renderWorld(world_, camera_, dt);
 
             glfwSwapBuffers(window_);
             glfwPollEvents();

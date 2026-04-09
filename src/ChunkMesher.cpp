@@ -99,7 +99,8 @@ void ChunkMesher::emitFace(ChunkMesh& mesh,
         v.tileX = tileX;
         v.tileY = tileY;
         v.ao    = ao[c];
-        v.normal = static_cast<uint8_t>(d);
+        // Write explicit normal vector for this face (as floats)
+        v.normal = glm::vec3(kFaces[d].normal);
         mesh.vertices.push_back(v);
     }
 

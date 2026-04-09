@@ -45,8 +45,9 @@ struct ChunkPalette {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Mesh vertex — 32 bytes, cache-line friendly
-//  Packed data reduces VRAM bandwidth significantly
+//  Mesh vertex — now includes explicit normal (glm::vec3)
+//  We keep a compact integer prefix for positions/uv/ao and append a
+//  3×float normal so shaders receive a normal directly at location=2.
 // ─────────────────────────────────────────────────────────────────────────────
 struct ChunkVertex {
     // Position relative to chunk origin (0-15, 0-255, 0-15) → fits in uint8
@@ -54,12 +55,14 @@ struct ChunkVertex {
     // UV within atlas tile: 0 or 1 on each axis (corner of 16x16 tile)
     uint8_t  u, v;
     uint8_t  tileX, tileY;        // atlas tile coordinates (0-15)
-    // Lighting: ao in [0-3], skyLight in [0-15], blockLight in [0-15]
+    // Lighting: ao in [0-3]
     uint8_t  ao;                  // 0=darkest, 3=brightest
-    uint8_t  normal;              // face index 0-5
-    uint8_t  pad[2];              // align to 12 bytes
+    // Padding to align following float3
+    uint8_t  pad[3];
+    // Face normal as floats (glm::vec3)
+    glm::vec3 normal;
 };
-static_assert(sizeof(ChunkVertex) == 12, "ChunkVertex must be 12 bytes");
+static_assert(sizeof(ChunkVertex) == 24, "ChunkVertex must be 24 bytes");
 
 struct ChunkMesh {
     std::vector<ChunkVertex> vertices;

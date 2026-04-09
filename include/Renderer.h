@@ -25,6 +25,8 @@ struct Frustum {
     bool intersectsAABB(const glm::vec3& min, const glm::vec3& max) const noexcept;
 };
 
+class SkyRenderer;
+
 class Renderer {
 public:
     Renderer();
@@ -37,7 +39,8 @@ public:
     void init();
 
     // Render all uploaded chunks
-    void renderWorld(const World& world, const Camera& camera);
+    // dt: seconds since last frame (used for day/night cycle)
+    void renderWorld(const World& world, const Camera& camera, float dt);
 
     // Debug HUD overlay
     void renderDebugInfo(const Camera& camera, int fps, int visibleChunks,
@@ -57,6 +60,13 @@ private:
 
     std::unique_ptr<Shader>  chunkShader_;
     std::unique_ptr<Shader>  waterShader_;
+    std::unique_ptr<SkyRenderer> skyRenderer_;
+
+    // Day/night state (computed once per frame)
+    float dayTime_ = 0.0f;
+    glm::vec3 sunDir_{0.6f, 1.0f, 0.3f};
+    glm::vec3 moonDir_{-0.6f, -1.0f, -0.3f};
+    glm::vec3 skyColor_{0.53f, 0.81f, 0.98f};
 
     GLuint atlasTexture_ = 0;
     bool   wireframe_    = false;

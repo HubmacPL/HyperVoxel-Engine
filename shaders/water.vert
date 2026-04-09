@@ -2,7 +2,8 @@
 // ── water.vert ────────────────────────────────────────────────────────────────
 layout(location = 0) in uvec4 aPos;
 layout(location = 1) in uvec4 aUVTile;
-layout(location = 2) in uvec2 aAONorm;
+layout(location = 2) in vec3  aNormal;
+layout(location = 3) in uint   aAO;
 
 uniform mat4  u_MVP;
 uniform vec3  u_ChunkOrigin;
