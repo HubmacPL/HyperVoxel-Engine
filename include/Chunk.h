@@ -73,10 +73,13 @@ struct ChunkMesh {
     uint32_t vbo = 0;
     uint32_t ebo = 0;
 
+    // Cached index count so CPU vectors can be freed after GPU upload
+    GLsizei  indexCount = 0;
+
     bool dirty    = true;   // needs re-upload to GPU
     bool uploaded = false;
 
-    void clear() { vertices.clear(); indices.clear(); dirty = true; uploaded = false; }
+    void clear() { vertices.clear(); indices.clear(); indexCount = 0; dirty = true; uploaded = false; }
 
     // Upload to GPU — must be called from GL thread
     void uploadToGPU();
@@ -118,6 +121,12 @@ public:
     // Raw array access for the mesher (avoids palette overhead in tight loops)
     // Returns pointer to flat uint16_t array, valid for lifetime of Chunk
     [[nodiscard]] const uint16_t* rawBlocks() const noexcept { return rawData_.data(); }
+
+    // Thread-safe snapshot of block data — use in meshing thread to avoid data race
+    [[nodiscard]] std::array<uint16_t, CHUNK_VOL> rawDataCopy() const {
+        std::unique_lock lock(blockMutex_);
+        return rawData_;
+    }
 
     // ── Position ──────────────────────────────────────────────────────────────
     [[nodiscard]] glm::ivec2 chunkPos()  const noexcept { return chunkPos_; }

@@ -51,7 +51,9 @@ public:
 
             // ── Render ────────────────────────────────────────────────────────
             // Renderer handles clear color (sky) and day/night now.
-            renderer_.renderWorld(world_, camera_, dt);
+            int vpW, vpH;
+            glfwGetFramebufferSize(window_, &vpW, &vpH);
+            renderer_.renderWorld(world_, camera_, dt, vpW, vpH);
 
             glfwSwapBuffers(window_);
             glfwPollEvents();
@@ -84,14 +86,16 @@ private:
         glfwSetWindowUserPointer(window_, this);
 
         glfwSetCursorPosCallback(window_, [](GLFWwindow* w, double x, double y) {
-            static double lastX = x, lastY = y;
-            static bool first = true;
-            if (first) { lastX = x; lastY = y; first = false; }
             auto* app = static_cast<Application*>(glfwGetWindowUserPointer(w));
+            if (app->firstMouse_) {
+                app->lastMouseX_ = x; app->lastMouseY_ = y;
+                app->firstMouse_ = false;
+                return;
+            }
             app->camera_.processMouseDelta(
-                static_cast<float>(x - lastX),
-                static_cast<float>(y - lastY));
-            lastX = x; lastY = y;
+                static_cast<float>(x - app->lastMouseX_),
+                static_cast<float>(y - app->lastMouseY_));
+            app->lastMouseX_ = x; app->lastMouseY_ = y;
         });
 
         glfwSetKeyCallback(window_, [](GLFWwindow* w, int key, int, int action, int) {
@@ -148,6 +152,8 @@ private:
     Camera                    camera_{{0, 90, 0}};
     std::unique_ptr<Player>   player_;
     Renderer                  renderer_;
+    double                    lastMouseX_ = 0.0, lastMouseY_ = 0.0;
+    bool                      firstMouse_ = true;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
