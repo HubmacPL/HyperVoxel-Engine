@@ -4,6 +4,7 @@
 #include "World.h"
 #include "Texture.h"
 #include "SkyRenderer.h"
+#include "GuiRenderer.h"
 #include <GL/glew.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
@@ -80,6 +81,10 @@ void Renderer::init() {
     // Sky renderer for sun/moon quads
     skyRenderer_ = std::make_unique<SkyRenderer>();
     skyRenderer_->init();
+
+    // GUI renderer (overlay)
+    guiRenderer_ = std::make_unique<GuiRenderer>();
+    guiRenderer_->init();
 }
 
 void Renderer::renderWorld(const World& world, const Camera& camera, float dt,
@@ -153,6 +158,9 @@ void Renderer::renderWorld(const World& world, const Camera& camera, float dt,
     glDepthMask(GL_FALSE);
 
     renderTransparentPass(world, camera, frustum, vp, drawCalls);
+
+    // Draw GUI overlay (flush any GUI draw calls previously recorded)
+    if (guiRenderer_) guiRenderer_->end();
 
     glDepthMask(GL_TRUE);
     glDisable(GL_BLEND);

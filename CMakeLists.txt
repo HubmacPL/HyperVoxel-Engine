@@ -57,6 +57,7 @@ set(SOURCES
     src/Shader.cpp
     src/Texture.cpp
     src/TextureAtlas.cpp
+    src/GuiRenderer.cpp
     src/Physics.cpp
     src/Player.cpp
     src/BlockRegistry.cpp

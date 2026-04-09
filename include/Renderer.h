@@ -5,6 +5,7 @@
 #include "World.h"
 #include "Shader.h"
 #include "Camera.h"
+#include "GuiRenderer.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Renderer — manages all draw calls for the world
@@ -63,6 +64,7 @@ private:
     std::unique_ptr<Shader>  chunkShader_;
     std::unique_ptr<Shader>  waterShader_;
     std::unique_ptr<SkyRenderer> skyRenderer_;
+    std::unique_ptr<GuiRenderer> guiRenderer_;
 
     // Day/night state (computed once per frame)
     float dayTime_ = 0.0f;
@@ -73,4 +75,7 @@ private:
     GLuint atlasTexture_ = 0;
     bool   wireframe_    = false;
     bool   initialised_  = false;
+public:
+    // Access to GUI renderer so callers can submit draw commands between begin()/end()
+    GuiRenderer* gui() { return guiRenderer_.get(); }
 };
