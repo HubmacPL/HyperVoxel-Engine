@@ -106,10 +106,12 @@ void Renderer::renderWorld(const World& world, const Camera& camera, float dt,
     sunDir_ = glm::normalize(glm::vec3(cos(theta), sin(theta), -0.05f));
     moonDir_ = -sunDir_;
 
-    // Day/night factor [0..1] from sun height
-    float sunY = glm::clamp(sunDir_.y, -1.0f, 1.0f);
-    float t = (sunY * 0.5f) + 0.5f; // map -1..1 -> 0..1
-    float dayNight = glm::clamp(t, 0.0f, 1.0f);
+    // Day/night factor [0..1] from sun height. Use smoothstep over a narrow
+    // window around the horizon so dusk and dawn last meaningfully (gives the
+    // shader's `sunAbove` term something to interpolate against) instead of
+    // the old linear sunY*0.5+0.5 which made midnight just a dim version of
+    // noon.
+    float dayNight = glm::smoothstep(-0.15f, 0.25f, sunDir_.y);
 
     // Sky colour blending: night <-> dusk <-> day
     const glm::vec3 dayColor(0.53f, 0.81f, 0.98f);
@@ -165,13 +167,20 @@ void Renderer::renderOpaquePass(const World& world,
 {
     chunkShader_->use();
 
+    // Warm sun tint at dawn/dusk, neutral-warm at noon. Drives the orange
+    // glow on west-facing cliffs as the sun drops.
+    float warm = 1.0f - glm::smoothstep(0.05f, 0.35f, sunDir_.y);
+    glm::vec3 sunColor = glm::mix(
+        glm::vec3(1.00f, 0.95f, 0.80f),  // noon — slightly warm white
+        glm::vec3(1.00f, 0.55f, 0.30f),  // horizon — saturated orange
+        warm);
+    float dayNight = glm::smoothstep(-0.15f, 0.25f, sunDir_.y);
+
     chunkShader_->setInt  ("u_Atlas",    0);
     chunkShader_->setMat4 ("u_MVP",      vp);
     chunkShader_->setVec3 ("u_SunDir",   glm::normalize(sunDir_));
     chunkShader_->setVec3 ("u_SkyColor", skyColor_);
-    chunkShader_->setVec3 ("u_SunColor", glm::vec3(1.0f, 0.95f, 0.8f));
-    chunkShader_->setFloat("u_Ambient",  0.35f);
-    float dayNight = glm::clamp((sunDir_.y * 0.5f) + 0.5f, 0.0f, 1.0f);
+    chunkShader_->setVec3 ("u_SunColor", sunColor);
     chunkShader_->setFloat("u_DayNight", dayNight);
     chunkShader_->setFloat("u_FogStart", static_cast<float>(world.renderDistance()-2) * CHUNK_W);
     chunkShader_->setFloat("u_FogEnd",   static_cast<float>(world.renderDistance())   * CHUNK_W);

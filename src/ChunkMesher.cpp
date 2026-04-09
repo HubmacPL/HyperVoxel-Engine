@@ -54,35 +54,45 @@ BlockType ChunkMesher::sampleBlock(const MeshContext& ctx, int x, int y, int z) 
 // ─────────────────────────────────────────────────────────────────────────────
 // sampleLight — read 4-bit skylight from corresponding light arrays
 // Offsets: x ∈ [-1, CHUNK_W], y ∈ [0, CHUNK_H-1], z ∈ [-1, CHUNK_D]
-// Returns skylight in [0,15]
+// Returns skylight in [0,15], or -1 when the sample falls inside an opaque
+// block (or outside the loaded region). Per-vertex smooth-lighting must skip
+// opaque samples — including them as zero used to drag corner light values
+// down and produce the visible dark rim/streak around standalone blocks.
 // ─────────────────────────────────────────────────────────────────────────────
-static uint8_t sampleLight(const MeshContext& ctx, int x, int y, int z) noexcept {
-    if (y < 0 || y >= CHUNK_H) return 0;
+static int sampleLight(const MeshContext& ctx, int x, int y, int z) noexcept {
+    if (y < 0 || y >= CHUNK_H) return -1;
 
-    const uint8_t* data = ctx.centerLight;
+    const uint8_t*  light  = ctx.centerLight;
+    const uint16_t* blocks = ctx.center;
 
     if (x < 0) {
-        if (!ctx.nxLight) return 0;
-        data = ctx.nxLight;
+        if (!ctx.nxLight || !ctx.nx) return -1;
+        light  = ctx.nxLight;
+        blocks = ctx.nx;
         x += CHUNK_W;
     } else if (x >= CHUNK_W) {
-        if (!ctx.pxLight) return 0;
-        data = ctx.pxLight;
+        if (!ctx.pxLight || !ctx.px) return -1;
+        light  = ctx.pxLight;
+        blocks = ctx.px;
         x -= CHUNK_W;
     }
 
     if (z < 0) {
-        if (!ctx.nzLight) return 0;
-        data = ctx.nzLight;
+        if (!ctx.nzLight || !ctx.nz) return -1;
+        light  = ctx.nzLight;
+        blocks = ctx.nz;
         z += CHUNK_D;
     } else if (z >= CHUNK_D) {
-        if (!ctx.pzLight) return 0;
-        data = ctx.pzLight;
+        if (!ctx.pzLight || !ctx.pz) return -1;
+        light  = ctx.pzLight;
+        blocks = ctx.pz;
         z -= CHUNK_D;
     }
 
-    uint8_t packed = data[blockIndex(x, y, z)];
-    return packed & 0x0Fu;
+    const int idx = blockIndex(x, y, z);
+    BlockType bt = static_cast<BlockType>(blocks[idx]);
+    if (!BlockRegistry::instance().isTransparent(bt)) return -1;
+    return static_cast<int>(light[idx] & 0x0Fu);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -246,22 +256,35 @@ ChunkMesh ChunkMesher::buildMesh(const MeshContext& ctx, const glm::ivec2& /*chu
                         ao[c] = computeAO(s1, s2, sc);
                     }
 
-                    // Compute per-corner skylight using smooth sampling in exposed air space.
-                    // We sample 4 positions in the face-normal layer (NOT the AO diagonal),
-                    // so we never read into solid terrain — which was the cause of
-                    // black vertical faces (skylight=0 inside solid blocks).
+                    // Compute per-corner skylight using smooth sampling in the
+                    // air layer in front of the face. sampleLight returns -1
+                    // for opaque or out-of-region samples; we average only the
+                    // valid ones so an adjacent solid block can't drag the
+                    // corner average toward zero. The face-center sample (s0)
+                    // is in clear air (we already culled occluded faces) so it
+                    // is always valid and acts as the fallback divisor.
                     std::array<uint8_t,4> light{};
                     for (int c = 0; c < 4; ++c) {
                         int cu = corners[c][0] * 2 - 1;  // -1 or +1
                         int cv = corners[c][1] * 2 - 1;
 
-                        // Step 1: move into the air room in front of the face (n offset)
-                        // Step 2: slide to the corner along the two tangent axes
-                        int s0 = sampleLight(ctx, x + n.x,                           y + n.y,                           z + n.z);
-                        int s1 = sampleLight(ctx, x + n.x + tU.x*cu,                 y + n.y + tU.y*cu,                 z + n.z + tU.z*cu);
-                        int s2 = sampleLight(ctx, x + n.x + tV.x*cv,                 y + n.y + tV.y*cv,                 z + n.z + tV.z*cv);
-                        int s3 = sampleLight(ctx, x + n.x + tU.x*cu + tV.x*cv,       y + n.y + tU.y*cu + tV.y*cv,      z + n.z + tU.z*cu + tV.z*cv);
-                        light[c] = static_cast<uint8_t>((s0 + s1 + s2 + s3 + 2) / 4);
+                        int samples[4] = {
+                            sampleLight(ctx, x + n.x,                     y + n.y,                     z + n.z),
+                            sampleLight(ctx, x + n.x + tU.x*cu,           y + n.y + tU.y*cu,           z + n.z + tU.z*cu),
+                            sampleLight(ctx, x + n.x + tV.x*cv,           y + n.y + tV.y*cv,           z + n.z + tV.z*cv),
+                            sampleLight(ctx, x + n.x + tU.x*cu + tV.x*cv, y + n.y + tU.y*cu + tV.y*cv, z + n.z + tU.z*cu + tV.z*cv),
+                        };
+
+                        int sum = 0, count = 0;
+                        for (int s : samples) {
+                            if (s >= 0) { sum += s; ++count; }
+                        }
+                        if (count == 0) {
+                            // Defensive fallback: face-center is normally valid.
+                            light[c] = 0;
+                        } else {
+                            light[c] = static_cast<uint8_t>((sum + count / 2) / count);
+                        }
                     }
 
                     emitFace(mesh, x, y, z, static_cast<FaceDir>(f), bt, ao, light);

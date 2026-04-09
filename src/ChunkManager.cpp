@@ -58,12 +58,66 @@ void ChunkManager::tick(const glm::ivec2& centerChunk, int renderDist) {
             nb.pz = getPtr({gf.cp.x, gf.cp.y+1});
             nb.nz = getPtr({gf.cp.x, gf.cp.y-1});
 
-            // Compute skylight propagation now (stops at unloaded neighbours)
-            computeFloodFillSkylight(*center, nb);
+            // Compute skylight propagation now (stops at unloaded neighbours).
+            // The BFS is symmetric: it can mutate neighbour chunks too. Any
+            // neighbour whose border light shifted needs its mesh rebuilt so
+            // smooth-lighting samples don't read stale values across the seam.
+            LightingUpdate touched = computeFloodFillSkylight(*center, nb);
+
+            auto markIfUploaded = [](Chunk* c) {
+                if (!c) return;
+                ChunkState s = c->state();
+                if (s >= ChunkState::Uploaded || s == ChunkState::NeedsMeshing)
+                    c->markDirty();
+            };
+            if (touched.px) markIfUploaded(nb.px);
+            if (touched.nx) markIfUploaded(nb.nx);
+            if (touched.pz) markIfUploaded(nb.pz);
+            if (touched.nz) markIfUploaded(nb.nz);
 
             // Mark chunk as TerrainGenerated so subsequent decoration/meshing may run
             center->setState(ChunkState::TerrainGenerated);
         }
+    }
+
+    // ── 1b. Process light-dirty chunks (block-edit relight) ──────────────────
+    // Block placement/break sets lightDirty_. Run BFS on the main thread now,
+    // before mesh scheduling, so the meshing snapshot we take below is stable
+    // and any neighbours whose border was modified can be marked for remesh.
+    for (auto& [cp, chunk] : chunks_) {
+        if (!chunk->isLightDirty()) continue;
+        // Need at least the four cardinal neighbours up so the BFS region is
+        // well-defined; otherwise defer (lightDirty stays set).
+        if (!neighboursReady(cp)) continue;
+
+        auto getPtr = [&](glm::ivec2 ncp) -> Chunk* {
+            auto nit = chunks_.find(ncp);
+            if (nit != chunks_.end() && nit->second->state() >= ChunkState::TerrainGenerated)
+                return nit->second.get();
+            return nullptr;
+        };
+        NeighborChunks nb{};
+        nb.px = getPtr({cp.x+1, cp.y});
+        nb.nx = getPtr({cp.x-1, cp.y});
+        nb.pz = getPtr({cp.x, cp.y+1});
+        nb.nz = getPtr({cp.x, cp.y-1});
+
+        chunk->resetSkylight();
+        LightingUpdate touched = computeFloodFillSkylight(*chunk, nb);
+        chunk->clearLightDirty();
+        chunk->markDirty(); // center always needs remesh after relight
+
+        auto markIfUploaded = [](Chunk* c) {
+            if (!c) return;
+            ChunkState s = c->state();
+            if (s >= ChunkState::Uploaded || s == ChunkState::NeedsMeshing)
+                c->markDirty();
+        };
+        (void)touched.center; // already handled
+        if (touched.px) markIfUploaded(nb.px);
+        if (touched.nx) markIfUploaded(nb.nx);
+        if (touched.pz) markIfUploaded(nb.pz);
+        if (touched.nz) markIfUploaded(nb.nz);
     }
 
     // ── 2. Collect finished mesh jobs ────────────────────────────────────────
@@ -182,8 +236,8 @@ void ChunkManager::scheduleMeshing(ChunkPtr chunk) {
     pz = get({cp.x, cp.y+1});
     nz = get({cp.x, cp.y-1});
 
-    // Capture neighbour ChunkPtrs (shared ownership) so the BFS inside the lambda
-    // can read their block+light data safely — they won't be destroyed under us.
+    // Keep neighbour chunks alive for the duration of meshing so their raw
+    // block pointers (px/nx/pz/nz) cannot dangle if the chunk is unloaded.
     auto getNeighbourChunk = [&](glm::ivec2 ncp) -> ChunkPtr {
         auto it = chunks_.find(ncp);
         if (it != chunks_.end() && it->second->state() >= ChunkState::TerrainGenerated)
@@ -195,60 +249,33 @@ void ChunkManager::scheduleMeshing(ChunkPtr chunk) {
     ChunkPtr pzChunk = getNeighbourChunk({cp.x, cp.y+1});
     ChunkPtr nzChunk = getNeighbourChunk({cp.x, cp.y-1});
 
-    bool needsLightRecompute = chunk->isLightDirty();
+    // Light recomputation now runs in tick() on the main thread *before* this
+    // scheduling pass, so light arrays are stable here. We just snapshot them.
+    auto centerLightData =
+        std::make_shared<std::array<uint8_t, CHUNK_VOL>>(chunk->rawLightDataCopy());
+    auto pxLightSnap = getLightSnap({cp.x+1, cp.y});
+    auto nxLightSnap = getLightSnap({cp.x-1, cp.y});
+    auto pzLightSnap = getLightSnap({cp.x, cp.y+1});
+    auto nzLightSnap = getLightSnap({cp.x, cp.y-1});
 
-    // If light is NOT dirty, snapshot it now on the main thread (stable).
-    // If light IS dirty, we'll recompute + snapshot inside the background thread.
-    auto centerLightData = needsLightRecompute
-        ? nullptr
-        : std::make_shared<std::array<uint8_t, CHUNK_VOL>>(chunk->rawLightDataCopy());
+    auto fut = meshPool_.submit([cp,
+                                 px, nx, pz, nz,
+                                 centerData,
+                                 pxChunk, nxChunk, pzChunk, nzChunk,
+                                 centerLightData,
+                                 pxLightSnap, nxLightSnap,
+                                 pzLightSnap, nzLightSnap]() mutable -> ChunkMesh {
+        // pxChunk/nxChunk/pzChunk/nzChunk captured solely to keep neighbour
+        // chunks alive while their raw block pointers (px/nx/pz/nz) are in use.
+        (void)pxChunk; (void)nxChunk; (void)pzChunk; (void)nzChunk;
 
-    auto pxLightSnap = needsLightRecompute ? nullptr : getLightSnap({cp.x+1, cp.y});
-    auto nxLightSnap = needsLightRecompute ? nullptr : getLightSnap({cp.x-1, cp.y});
-    auto pzLightSnap = needsLightRecompute ? nullptr : getLightSnap({cp.x, cp.y+1});
-    auto nzLightSnap = needsLightRecompute ? nullptr : getLightSnap({cp.x, cp.y-1});
-
-    auto fut = meshPool_.submit([=, centerData = centerData, chunk = chunk,
-                                 pxChunk = pxChunk, nxChunk = nxChunk,
-                                 pzChunk = pzChunk, nzChunk = nzChunk,
-                                 centerLightData = centerLightData,
-                                 pxLightSnap = pxLightSnap, nxLightSnap = nxLightSnap,
-                                 pzLightSnap = pzLightSnap, nzLightSnap = nzLightSnap]() mutable -> ChunkMesh {
-
-        // ── Light recomputation (background thread) ───────────────────────────
-        // Runs only when a block was broken/placed (lightDirty flag set).
-        // Neighbour chunks are kept alive via shared_ptr captures above.
-        std::shared_ptr<std::array<uint8_t, CHUNK_VOL>> cld = centerLightData;
-        std::shared_ptr<std::array<uint8_t, CHUNK_VOL>> pxls = pxLightSnap;
-        std::shared_ptr<std::array<uint8_t, CHUNK_VOL>> nxls = nxLightSnap;
-        std::shared_ptr<std::array<uint8_t, CHUNK_VOL>> pzls = pzLightSnap;
-        std::shared_ptr<std::array<uint8_t, CHUNK_VOL>> nzls = nzLightSnap;
-
-        if (needsLightRecompute) {
-            chunk->resetSkylight();
-            NeighborChunks nb{};
-            nb.px = pxChunk ? pxChunk.get() : nullptr;
-            nb.nx = nxChunk ? nxChunk.get() : nullptr;
-            nb.pz = pzChunk ? pzChunk.get() : nullptr;
-            nb.nz = nzChunk ? nzChunk.get() : nullptr;
-            computeFloodFillSkylight(*chunk, nb);
-            chunk->clearLightDirty();
-
-            // Take snapshots after recomputation
-            cld  = std::make_shared<std::array<uint8_t, CHUNK_VOL>>(chunk->rawLightDataCopy());
-            pxls = pxChunk ? std::make_shared<std::array<uint8_t, CHUNK_VOL>>(pxChunk->rawLightDataCopy()) : nullptr;
-            nxls = nxChunk ? std::make_shared<std::array<uint8_t, CHUNK_VOL>>(nxChunk->rawLightDataCopy()) : nullptr;
-            pzls = pzChunk ? std::make_shared<std::array<uint8_t, CHUNK_VOL>>(pzChunk->rawLightDataCopy()) : nullptr;
-            nzls = nzChunk ? std::make_shared<std::array<uint8_t, CHUNK_VOL>>(nzChunk->rawLightDataCopy()) : nullptr;
-        }
-
-        const uint8_t* pxL = pxls ? pxls->data() : nullptr;
-        const uint8_t* nxL = nxls ? nxls->data() : nullptr;
-        const uint8_t* pzL = pzls ? pzls->data() : nullptr;
-        const uint8_t* nzL = nzls ? nzls->data() : nullptr;
+        const uint8_t* pxL = pxLightSnap ? pxLightSnap->data() : nullptr;
+        const uint8_t* nxL = nxLightSnap ? nxLightSnap->data() : nullptr;
+        const uint8_t* pzL = pzLightSnap ? pzLightSnap->data() : nullptr;
+        const uint8_t* nzL = nzLightSnap ? nzLightSnap->data() : nullptr;
 
         MeshContext ctx{ centerData->data(), px, nx, nullptr, nullptr, pz, nz,
-                         cld->data(), pxL, nxL, nullptr, nullptr, pzL, nzL };
+                         centerLightData->data(), pxL, nxL, nullptr, nullptr, pzL, nzL };
 
         return ChunkMesher::buildMesh(ctx, cp);
     });

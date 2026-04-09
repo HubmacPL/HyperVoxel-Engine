@@ -5,162 +5,244 @@
 #include <utility>
 #include <cassert>
 
-// BFS node: chunk pointer + local coordinates inside that chunk
+// ─────────────────────────────────────────────────────────────────────────────
+// Voxel skylight flood-fill BFS.
+//
+// The BFS works on a region of up to 5 chunks (center + 4 cardinal neighbours).
+// Each queue node carries a chunk pointer plus local coords inside that chunk,
+// so propagation can hop across chunk seams seamlessly.
+//
+// Symmetry note: we seed from BOTH the center chunk's full-skylight cells AND
+// from the 1-cell-thick border strips of every loaded neighbour. Without the
+// neighbour seeding, an already-lit neighbour could not push light into a dark
+// overhang on the center side, producing visible seam artefacts on chunk
+// boundaries. With it, the BFS converges to the same result regardless of the
+// order in which chunks were generated.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
 struct LightNode {
     Chunk* chunk;
     int x, y, z;
 };
 
-void computeFloodFillSkylight(Chunk& center, const NeighborChunks& neighbors) {
-    using namespace std;
+// Encode neighbour identity as a small index so we can flag "this chunk was
+// mutated" without a chain of pointer comparisons in the hot loop.
+//   0 = center, 1 = px, 2 = nx, 3 = pz, 4 = nz
+constexpr int kCenter = 0;
+constexpr int kPx = 1;
+constexpr int kNx = 2;
+constexpr int kPz = 3;
+constexpr int kNz = 4;
+
+// Resolve a (chunk, dx, dz) move into another chunk in the 5-chunk region.
+// Returns nullptr if the target lies outside the provided neighbour set.
+// `outIdx` receives the LightingUpdate slot of the resolved target.
+inline Chunk* stepChunk(Chunk* from, int fromIdx,
+                        int& localX, int& localZ,
+                        const NeighborChunks& nb,
+                        Chunk& center, int& outIdx) noexcept
+{
+    // Bring localX/localZ back into [0, CHUNK_W) / [0, CHUNK_D) and remember
+    // which side we crossed.
+    int crossX = 0, crossZ = 0;
+    if (localX < 0)            { localX += CHUNK_W; crossX = -1; }
+    else if (localX >= CHUNK_W){ localX -= CHUNK_W; crossX = +1; }
+    if (localZ < 0)            { localZ += CHUNK_D; crossZ = -1; }
+    else if (localZ >= CHUNK_D){ localZ -= CHUNK_D; crossZ = +1; }
+
+    if (crossX == 0 && crossZ == 0) {
+        outIdx = fromIdx;
+        return from;
+    }
+
+    // Translate the source chunk's "world cell" of the 5-chunk region by the
+    // crossings, then map to a known chunk. Only single-step cardinal moves
+    // are supported — diagonals leave the region.
+    // Determine source's world cell:
+    int sx = 0, sz = 0;
+    switch (fromIdx) {
+        case kPx: sx = +1; break;
+        case kNx: sx = -1; break;
+        case kPz: sz = +1; break;
+        case kNz: sz = -1; break;
+        default: break;
+    }
+    int tx = sx + crossX;
+    int tz = sz + crossZ;
+
+    if (tx ==  0 && tz ==  0) { outIdx = kCenter; return &center; }
+    if (tx == +1 && tz ==  0) { outIdx = kPx; return nb.px; }
+    if (tx == -1 && tz ==  0) { outIdx = kNx; return nb.nx; }
+    if (tx ==  0 && tz == +1) { outIdx = kPz; return nb.pz; }
+    if (tx ==  0 && tz == -1) { outIdx = kNz; return nb.nz; }
+    // Diagonal or 2-step away: outside the 5-chunk region.
+    outIdx = -1;
+    return nullptr;
+}
+
+inline void pushIfImproves(std::deque<LightNode>& q,
+                           Chunk* chunk, int idx,
+                           int x, int y, int z,
+                           const NeighborChunks& nb,
+                           Chunk& center,
+                           const BlockRegistry& reg)
+{
+    if (chunk == nullptr) return;
+    uint8_t src = chunk->getSkylight(x, y, z);
+    if (src <= 1) return; // nothing to push (a light of 1 attenuates to 0)
+
+    // Only enqueue if any of the 6 neighbours could actually improve.
+    static constexpr int dx[6] = {+1,-1,0,0,0,0};
+    static constexpr int dy[6] = {0,0,+1,-1,0,0};
+    static constexpr int dz[6] = {0,0,0,0,+1,-1};
+    for (int d = 0; d < 6; ++d) {
+        int nxL = x + dx[d];
+        int nyL = y + dy[d];
+        int nzL = z + dz[d];
+        if (nyL < 0 || nyL >= CHUNK_H) continue;
+        int outIdx = -1;
+        int lx = nxL, lz = nzL;
+        Chunk* tgt = stepChunk(chunk, idx, lx, lz, nb, center, outIdx);
+        if (!tgt) continue;
+        BlockType nbt = static_cast<BlockType>(tgt->rawBlocks()[blockIndex(lx, nyL, lz)]);
+        if (!reg.isTransparent(nbt)) continue;
+        int atten = (nbt == BlockType::Leaves) ? 2 : 1;
+        if (static_cast<int>(src) - atten > tgt->getSkylight(lx, nyL, lz)) {
+            q.push_back({ chunk, x, y, z });
+            return;
+        }
+    }
+}
+
+} // namespace
+
+LightingUpdate computeFloodFillSkylight(Chunk& center, const NeighborChunks& neighbors) {
+    LightingUpdate touched{};
     const BlockRegistry& reg = BlockRegistry::instance();
 
-    // Helper: map a known chunk pointer to its relative (cx,cz) offset from center
-    auto relOffset = [&](Chunk* c) -> pair<int,int> {
-        if (c == &center) return {0,0};
-        if (c == neighbors.px) return {+1,0};
-        if (c == neighbors.nx) return {-1,0};
-        if (c == neighbors.pz) return {0,+1};
-        if (c == neighbors.nz) return {0,-1};
-        return {100,100};
-    };
-
-    // Convenience lambda to get block type in a given chunk (assumes coords in-range)
-    auto blockAt = [&](Chunk* c, int lx, int ly, int lz) -> BlockType {
-        assert(c != nullptr);
-        const uint16_t* raw = c->rawBlocks();
-        return static_cast<BlockType>(raw[blockIndex(lx, ly, lz)]);
-    };
-
-    // Utility to read/set skylight nibble in a chunk (coords in-range)
-    auto getSkylight = [&](Chunk* c, int lx, int ly, int lz) -> uint8_t {
-        assert(c != nullptr);
-        return c->getSkylight(lx, ly, lz);
-    };
-    auto setSkylight = [&](Chunk* c, int lx, int ly, int lz, uint8_t v) {
-        assert(c != nullptr);
-        c->setSkylight(lx, ly, lz, v);
-    };
-
-    // --- Step 0: vertical seeding (mark sky-exposed transparent cells skylight=15)
-    // For each column (x,z) in the chunk, scan down from top and set skylight=15
+    // ── Step 0: vertical seeding (center only) ───────────────────────────────
+    // Sky-exposed transparent cells get skylight=15. We do this only for the
+    // center chunk; neighbours were already vertically seeded when they ran
+    // their own initial BFS pass.
     for (int x = 0; x < CHUNK_W; ++x) {
         for (int z = 0; z < CHUNK_D; ++z) {
             for (int y = CHUNK_H - 1; y >= 0; --y) {
-                BlockType bt = blockAt(&center, x, y, z);
-                if (!reg.isTransparent(bt)) {
-                    // opaque — anything below is shadowed by this block (vertical seed stops)
-                    break;
+                BlockType bt = static_cast<BlockType>(
+                    center.rawBlocks()[blockIndex(x, y, z)]);
+                if (!reg.isTransparent(bt)) break;
+                if (center.getSkylight(x, y, z) != 15u) {
+                    center.setSkylight(x, y, z, 15u);
+                    touched.center = true;
                 }
-                // transparent: mark as full skylight
-                uint8_t cur = getSkylight(&center, x, y, z);
-                if (cur != 15u) setSkylight(&center, x, y, z, 15u);
             }
         }
     }
 
-    // --- Step 1: initialize BFS queue with all skylight==15 cells that have at least one neighbour
-    // that could be improved (cut down on queue size)
-    deque<LightNode> q;
+    // ── Step 1: enqueue seeds ────────────────────────────────────────────────
+    // Center: every cell that could push to a darker neighbour.
+    std::deque<LightNode> q;
     for (int x = 0; x < CHUNK_W; ++x) {
         for (int z = 0; z < CHUNK_D; ++z) {
             for (int y = 0; y < CHUNK_H; ++y) {
-                if (getSkylight(&center, x, y, z) != 15u) continue;
-                // examine 6 neighbours
-                bool push = false;
-                const int dx[6] = {+1,-1,0,0,0,0};
-                const int dy[6] = {0,0,+1,-1,0,0};
-                const int dz[6] = {0,0,0,0,+1,-1};
-                for (int d = 0; d < 6 && !push; ++d) {
-                    int nx = x + dx[d];
-                    int ny = y + dy[d];
-                    int nz = z + dz[d];
-                    if (ny < 0 || ny >= CHUNK_H) continue;
-
-                    // Determine which chunk owns (nx,nz). Start with center rel offset 0,0.
-                    int relX = 0, relZ = 0;
-                    int localX = nx, localZ = nz;
-                    if (localX < 0) { localX += CHUNK_W; relX = -1; }
-                    else if (localX >= CHUNK_W) { localX -= CHUNK_W; relX = +1; }
-                    if (localZ < 0) { localZ += CHUNK_D; relZ = -1; }
-                    else if (localZ >= CHUNK_D) { localZ -= CHUNK_D; relZ = +1; }
-
-                    Chunk* target = nullptr;
-                    if (relX == 0 && relZ == 0) target = &center;
-                    else if (relX == 1 && relZ == 0) target = neighbors.px;
-                    else if (relX == -1 && relZ == 0) target = neighbors.nx;
-                    else if (relX == 0 && relZ == 1) target = neighbors.pz;
-                    else if (relX == 0 && relZ == -1) target = neighbors.nz;
-                    else target = nullptr; // beyond provided neighbours
-
-                    if (!target) continue; // stops at unloaded/unknown boundaries
-
-                    // Only consider transparent neighbours
-                    BlockType nbt = blockAt(target, localX, ny, localZ);
-                    if (!reg.isTransparent(nbt)) continue;
-
-                    uint8_t nlight = getSkylight(target, localX, ny, localZ);
-                    // attenuation base 1, leaves cost extra 1
-                    int atten = (nbt == BlockType::Leaves) ? 2 : 1;
-                    if (nlight + atten < 15) {
-                        push = true;
-                    }
-                }
-                if (push) q.push_back({ &center, x, y, z });
+                if (center.getSkylight(x, y, z) <= 1) continue;
+                pushIfImproves(q, &center, kCenter, x, y, z, neighbors, center, reg);
             }
         }
     }
 
-    // --- Step 2: BFS propagation
-    const int dx[6] = {+1,-1,0,0,0,0};
-    const int dy[6] = {0,0,+1,-1,0,0};
-    const int dz[6] = {0,0,0,0,+1,-1};
+    // Neighbour border strips: 1-thick column on the side facing center.
+    auto seedNeighbourStrip = [&](Chunk* nbChunk, int idx,
+                                  int fixedX, int fixedZ,
+                                  bool varyX, bool varyZ)
+    {
+        if (!nbChunk) return;
+        for (int y = 0; y < CHUNK_H; ++y) {
+            if (varyX) {
+                for (int xx = 0; xx < CHUNK_W; ++xx) {
+                    if (nbChunk->getSkylight(xx, y, fixedZ) > 1)
+                        pushIfImproves(q, nbChunk, idx, xx, y, fixedZ,
+                                       neighbors, center, reg);
+                }
+            } else if (varyZ) {
+                for (int zz = 0; zz < CHUNK_D; ++zz) {
+                    if (nbChunk->getSkylight(fixedX, y, zz) > 1)
+                        pushIfImproves(q, nbChunk, idx, fixedX, y, zz,
+                                       neighbors, center, reg);
+                }
+            }
+        }
+    };
+
+    // +X neighbour: cells adjacent to center are at localX = 0
+    seedNeighbourStrip(neighbors.px, kPx, /*fixedX*/0, /*fixedZ*/0,
+                       /*varyX*/false, /*varyZ*/true);
+    // -X neighbour: cells adjacent to center are at localX = CHUNK_W-1
+    seedNeighbourStrip(neighbors.nx, kNx, /*fixedX*/CHUNK_W - 1, /*fixedZ*/0,
+                       /*varyX*/false, /*varyZ*/true);
+    // +Z neighbour: cells adjacent to center are at localZ = 0
+    seedNeighbourStrip(neighbors.pz, kPz, /*fixedX*/0, /*fixedZ*/0,
+                       /*varyX*/true,  /*varyZ*/false);
+    // -Z neighbour: cells adjacent to center are at localZ = CHUNK_D-1
+    seedNeighbourStrip(neighbors.nz, kNz, /*fixedX*/0, /*fixedZ*/CHUNK_D - 1,
+                       /*varyX*/true,  /*varyZ*/false);
+
+    // ── Step 2: BFS propagation ───────────────────────────────────────────────
+    static constexpr int dx[6] = {+1,-1,0,0,0,0};
+    static constexpr int dy[6] = {0,0,+1,-1,0,0};
+    static constexpr int dz[6] = {0,0,0,0,+1,-1};
+
+    auto idxOf = [&](Chunk* c) -> int {
+        if (c == &center)        return kCenter;
+        if (c == neighbors.px)   return kPx;
+        if (c == neighbors.nx)   return kNx;
+        if (c == neighbors.pz)   return kPz;
+        if (c == neighbors.nz)   return kNz;
+        return -1;
+    };
 
     while (!q.empty()) {
         LightNode n = q.front(); q.pop_front();
-        uint8_t src = getSkylight(n.chunk, n.x, n.y, n.z);
-        if (src == 0) continue;
+        const int nodeIdx = idxOf(n.chunk);
+        if (nodeIdx < 0) continue;
+
+        const uint8_t src = n.chunk->getSkylight(n.x, n.y, n.z);
+        if (src <= 1) continue;
 
         for (int d = 0; d < 6; ++d) {
-            int nx = n.x + dx[d];
-            int ny = n.y + dy[d];
-            int nz = n.z + dz[d];
-            if (ny < 0 || ny >= CHUNK_H) continue; // vertical boundaries: stop
+            int nxL = n.x + dx[d];
+            int nyL = n.y + dy[d];
+            int nzL = n.z + dz[d];
+            if (nyL < 0 || nyL >= CHUNK_H) continue;
 
-            // Determine relative offset of the chunk the node currently sits in
-            auto rel = relOffset(n.chunk);
-            int outRelX = rel.first;
-            int outRelZ = rel.second;
-            int localX = nx;
-            int localZ = nz;
+            int outIdx = -1;
+            int lx = nxL, lz = nzL;
+            Chunk* tgt = stepChunk(n.chunk, nodeIdx, lx, lz,
+                                   neighbors, center, outIdx);
+            if (!tgt) continue;
 
-            if (localX < 0) { localX += CHUNK_W; outRelX -= 1; }
-            else if (localX >= CHUNK_W) { localX -= CHUNK_W; outRelX += 1; }
-            if (localZ < 0) { localZ += CHUNK_D; outRelZ -= 1; }
-            else if (localZ >= CHUNK_D) { localZ -= CHUNK_D; outRelZ += 1; }
-
-            Chunk* target = nullptr;
-            if (outRelX == 0 && outRelZ == 0) target = &center;
-            else if (outRelX == 1 && outRelZ == 0) target = neighbors.px;
-            else if (outRelX == -1 && outRelZ == 0) target = neighbors.nx;
-            else if (outRelX == 0 && outRelZ == 1) target = neighbors.pz;
-            else if (outRelX == 0 && outRelZ == -1) target = neighbors.nz;
-            else target = nullptr;
-
-            if (!target) continue; // boundary: stop if neighbour not provided
-
-            // If target is not transparent at that position, light cannot enter
-            BlockType nbt = blockAt(target, localX, ny, localZ);
+            BlockType nbt = static_cast<BlockType>(
+                tgt->rawBlocks()[blockIndex(lx, nyL, lz)]);
             if (!reg.isTransparent(nbt)) continue;
 
-            int atten = (nbt == BlockType::Leaves) ? 2 : 1;
-            if (src <= atten) continue; // no light to pass
-            uint8_t newLight = static_cast<uint8_t>(src - atten);
-            uint8_t curLight = getSkylight(target, localX, ny, localZ);
-            if (curLight >= newLight) continue;
+            const int atten = (nbt == BlockType::Leaves) ? 2 : 1;
+            if (static_cast<int>(src) <= atten) continue;
+            const uint8_t newLight = static_cast<uint8_t>(src - atten);
+            if (tgt->getSkylight(lx, nyL, lz) >= newLight) continue;
 
-            setSkylight(target, localX, ny, localZ, newLight);
-            q.push_back({ target, localX, ny, localZ });
+            tgt->setSkylight(lx, nyL, lz, newLight);
+            switch (outIdx) {
+                case kCenter: touched.center = true; break;
+                case kPx:     touched.px = true;     break;
+                case kNx:     touched.nx = true;     break;
+                case kPz:     touched.pz = true;     break;
+                case kNz:     touched.nz = true;     break;
+                default: break;
+            }
+            q.push_back({ tgt, lx, nyL, lz });
         }
     }
+
+    return touched;
 }
