@@ -54,9 +54,17 @@ std::string Shader::loadFile(const std::string& path) {
     return ss.str();
 }
 
-void Shader::setInt  (const char* n, int v)              const { glUniform1i (glGetUniformLocation(id_,n), v); }
-void Shader::setFloat(const char* n, float v)            const { glUniform1f (glGetUniformLocation(id_,n), v); }
-void Shader::setVec3 (const char* n, const glm::vec3& v) const { glUniform3fv(glGetUniformLocation(id_,n), 1, glm::value_ptr(v)); }
-void Shader::setVec4 (const char* n, const glm::vec4& v) const { glUniform4fv(glGetUniformLocation(id_,n), 1, glm::value_ptr(v)); }
-void Shader::setMat4 (const char* n, const glm::mat4& m) const { glUniformMatrix4fv(glGetUniformLocation(id_,n), 1, GL_FALSE, glm::value_ptr(m)); }
-void Shader::setMat3 (const char* n, const glm::mat3& m) const { glUniformMatrix3fv(glGetUniformLocation(id_,n), 1, GL_FALSE, glm::value_ptr(m)); }
+GLint Shader::getLocation(const char* name) const {
+    auto it = locCache_.find(name);
+    if (it != locCache_.end()) return it->second;
+    GLint loc = glGetUniformLocation(id_, name);
+    locCache_.emplace(name, loc);
+    return loc;
+}
+
+void Shader::setInt  (const char* n, int v)              const { glUniform1i (getLocation(n), v); }
+void Shader::setFloat(const char* n, float v)            const { glUniform1f (getLocation(n), v); }
+void Shader::setVec3 (const char* n, const glm::vec3& v) const { glUniform3fv(getLocation(n), 1, glm::value_ptr(v)); }
+void Shader::setVec4 (const char* n, const glm::vec4& v) const { glUniform4fv(getLocation(n), 1, glm::value_ptr(v)); }
+void Shader::setMat4 (const char* n, const glm::mat4& m) const { glUniformMatrix4fv(getLocation(n), 1, GL_FALSE, glm::value_ptr(m)); }
+void Shader::setMat3 (const char* n, const glm::mat3& m) const { glUniformMatrix3fv(getLocation(n), 1, GL_FALSE, glm::value_ptr(m)); }

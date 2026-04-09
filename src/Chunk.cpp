@@ -27,8 +27,8 @@ void ChunkPalette::build(const std::array<BlockType, CHUNK_VOL>& raw) {
         data8.resize(CHUNK_VOL);
         // Build reverse lookup
         std::array<uint8_t, 65536> lookup{};
-        for (uint8_t i = 0; i < static_cast<uint8_t>(palette.size()); ++i)
-            lookup[static_cast<uint16_t>(palette[i])] = i;
+        for (size_t i = 0; i < palette.size(); ++i)
+            lookup[static_cast<uint16_t>(palette[i])] = static_cast<uint8_t>(i);
         for (int i = 0; i < CHUNK_VOL; ++i)
             data8[i] = lookup[static_cast<uint16_t>(raw[i])];
     } else {
@@ -167,8 +167,13 @@ void ChunkMesh::uploadToGPU() {
 
     glBindVertexArray(0);
 
+    indexCount = static_cast<int>(indices.size());
     dirty    = false;
     uploaded = true;
+
+    // Free CPU copies — GPU now owns the data
+    std::vector<ChunkVertex>{}.swap(vertices);
+    std::vector<uint32_t>{}.swap(indices);
 }
 
 void ChunkMesh::freeGPU() {
