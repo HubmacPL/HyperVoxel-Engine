@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <unordered_map>
 #include <GL/glew.h>
 #include <glm/glm.hpp>
 
@@ -32,5 +33,8 @@ public:
 private:
     GLuint compile(GLenum type, const std::string& src);
     std::string loadFile(const std::string& path);
+    GLint getLocation(const char* name) const;
+
     GLuint id_ = 0;
+    mutable std::unordered_map<std::string, GLint> locCache_;
 };

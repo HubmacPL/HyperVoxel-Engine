@@ -80,10 +80,13 @@ void Renderer::init() {
     skyRenderer_->init();
 }
 
-void Renderer::renderWorld(const World& world, const Camera& camera, float dt) {
+void Renderer::renderWorld(const World& world, const Camera& camera, float dt,
+                           int viewportW, int viewportH) {
     if (!initialised_) return;
 
-    const float aspect = 16.f / 9.f;
+    const float aspect = (viewportH > 0)
+        ? static_cast<float>(viewportW) / static_cast<float>(viewportH)
+        : 16.f / 9.f;
     const glm::mat4 view = camera.viewMatrix();
     const glm::mat4 proj = camera.projMatrix(aspect, 70.f, 0.05f, 800.f);
     const glm::mat4 vp   = proj * view;
@@ -93,8 +96,8 @@ void Renderer::renderWorld(const World& world, const Camera& camera, float dt) {
 
     // --- Day/night cycle (advance once per frame) ---
     const float dayLength = 120.0f; // seconds per full day
-    dayTime_ += dt;
-    float phase = fmod(dayTime_, dayLength) / dayLength; // 0..1
+    dayTime_ = fmod(dayTime_ + dt, dayLength);  // keep value small to preserve float precision
+    float phase = dayTime_ / dayLength; // 0..1
     float theta = phase * glm::pi<float>() * 2.0f;
     // Sun moves in a vertical arc (X axis offset)
     sunDir_ = glm::normalize(glm::vec3(cos(theta), sin(theta), 0.05f));
@@ -202,9 +205,7 @@ void Renderer::renderOpaquePass(const World& world,
         chunkShader_->setVec3("u_ChunkOrigin", chunk->worldOrigin());
 
         glBindVertexArray(mesh.vao);
-        glDrawElements(GL_TRIANGLES,
-                       static_cast<GLsizei>(mesh.indices.size()),
-                       GL_UNSIGNED_INT, nullptr);
+        glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
 
         ++drawCalls;
         ++visibleChunks;

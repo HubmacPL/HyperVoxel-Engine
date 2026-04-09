@@ -112,8 +112,10 @@ void Player::placeBlock(World& world, const glm::vec3& camDir, BlockType type) {
     glm::ivec3 hit, prev;
     if (raycastBlock(world, eyePos(), glm::normalize(camDir), kReach, hit, prev)) {
         // Ensure not placing inside player
-        AABB blockAABB{ {(float)prev.x, (float)prev.y, (float)prev.z},
-                        {(float)prev.x+1, (float)prev.y+1, (float)prev.z+1} };
+        AABB blockAABB{
+            { static_cast<float>(prev.x),   static_cast<float>(prev.y),   static_cast<float>(prev.z)   },
+            { static_cast<float>(prev.x)+1, static_cast<float>(prev.y)+1, static_cast<float>(prev.z)+1 }
+        };
         if (!aabb_.intersects(blockAABB))
             world.setBlock(prev.x, prev.y, prev.z, type);
     }

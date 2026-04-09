@@ -2,6 +2,7 @@
 #include "ChunkMesher.h"
 #include "TerrainGenerator.h"
 #include <algorithm>
+#include <memory>
 
 ChunkManager::ChunkManager(World& world, TerrainGenerator& gen, ChunkMap<ChunkPtr>& worldChunks)
     : world_(world)
@@ -58,6 +59,9 @@ void ChunkManager::tick(const glm::ivec2& centerChunk, int renderDist) {
     // Budget: don't flood the thread pool (causes memory pressure)
     constexpr size_t kMaxPendingGen  = 16;
     constexpr size_t kMaxPendingMesh = 8;
+    // Decoration runs synchronously — cap at 1 per tick to bound frame time
+    constexpr int kMaxDecorationsPerTick = 1;
+    int decorationsThisTick = 0;
 
     for (auto& [cp, chunk] : chunks_) {
         // Prioritise chunks close to player (spiral order handled by World)
@@ -67,8 +71,9 @@ void ChunkManager::tick(const glm::ivec2& centerChunk, int renderDist) {
                 scheduleGeneration(chunk);
             }
         } else if (chunk->state() == ChunkState::TerrainGenerated) {
-            if (neighbours3x3Ready(cp)) {
+            if (neighbours3x3Ready(cp) && decorationsThisTick < kMaxDecorationsPerTick) {
                 decorateChunk(chunk);
+                ++decorationsThisTick;
             }
         } else if (chunk->state() == ChunkState::NeedsMeshing ||
                    (chunk->state() == ChunkState::Uploaded && chunk->isDirty())) {
@@ -119,9 +124,11 @@ void ChunkManager::scheduleMeshing(ChunkPtr chunk) {
     chunk->setState(ChunkState::Meshing);
     glm::ivec2 cp = chunk->chunkPos();
 
-    // Capture raw block pointers — safe because Chunk lifetime > future
-    // Chunks are only removed after unloadChunk which waits for futures
-    const uint16_t* center = chunk->rawBlocks();
+    // Snapshot center data under blockMutex — prevents data race with setBlock()
+    // which writes rawData_ on the main thread while the mesh thread reads it.
+    auto centerData = std::make_shared<std::array<uint16_t, CHUNK_VOL>>(
+        chunk->rawDataCopy());
+
     const uint16_t* px = nullptr, *nx = nullptr;
     const uint16_t* pz = nullptr, *nz = nullptr;
 
@@ -138,9 +145,10 @@ void ChunkManager::scheduleMeshing(ChunkPtr chunk) {
     pz = get({cp.x, cp.y+1});
     nz = get({cp.x, cp.y-1});
 
-    MeshContext ctx{ center, px, nx, nullptr, nullptr, pz, nz };
+    MeshContext ctx{ centerData->data(), px, nx, nullptr, nullptr, pz, nz };
 
-    auto fut = meshPool_.submit([ctx, cp]() -> ChunkMesh {
+    // centerData captured to keep the snapshot alive for the duration of the future
+    auto fut = meshPool_.submit([ctx, cp, centerData]() -> ChunkMesh {
         return ChunkMesher::buildMesh(ctx, cp);
     });
 

@@ -40,7 +40,9 @@ public:
 
     // Render all uploaded chunks
     // dt: seconds since last frame (used for day/night cycle)
-    void renderWorld(const World& world, const Camera& camera, float dt);
+    // viewportW/H: current framebuffer size (used for aspect ratio)
+    void renderWorld(const World& world, const Camera& camera, float dt,
+                     int viewportW, int viewportH);
 
     // Debug HUD overlay
     void renderDebugInfo(const Camera& camera, int fps, int visibleChunks,
