@@ -75,6 +75,8 @@ void Renderer::init() {
     }
 
     initialised_ = true;
+    // Start dayTime so the sun begins roughly in front of the camera
+    dayTime_ = 0.0f; // corresponds to dayLength*0.5 where dayLength ~= 120s
     // Sky renderer for sun/moon quads
     skyRenderer_ = std::make_unique<SkyRenderer>();
     skyRenderer_->init();
@@ -99,8 +101,9 @@ void Renderer::renderWorld(const World& world, const Camera& camera, float dt,
     dayTime_ = fmod(dayTime_ + dt, dayLength);  // keep value small to preserve float precision
     float phase = dayTime_ / dayLength; // 0..1
     float theta = phase * glm::pi<float>() * 2.0f;
-    // Sun moves in a vertical arc (X axis offset)
-    sunDir_ = glm::normalize(glm::vec3(cos(theta), sin(theta), 0.05f));
+    // Sun moves in a vertical arc across X (east-west) and Y (elevation).
+    // Keep a small negative Z bias so the sun is generally in front of the camera.
+    sunDir_ = glm::normalize(glm::vec3(cos(theta), sin(theta), -0.05f));
     moonDir_ = -sunDir_;
 
     // Day/night factor [0..1] from sun height
@@ -124,8 +127,15 @@ void Renderer::renderWorld(const World& world, const Camera& camera, float dt,
     glClearColor(skyColor_.r, skyColor_.g, skyColor_.b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    // Render sun/moon quads first (no depth write/test inside)
+    // Render sun/moon quads first (no depth write/test inside). Use alpha
+    // blending so we can render round discs, and disable face culling so
+    // billboards aren't accidentally backface-culled.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_CULL_FACE);
     if (skyRenderer_) skyRenderer_->render(camera, camera.position(), sunDir_, moonDir_, vp);
+    glEnable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
 
     int drawCalls = 0, visibleChunks = 0;
 

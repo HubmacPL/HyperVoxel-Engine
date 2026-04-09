@@ -74,7 +74,7 @@ struct ChunkMesh {
     uint32_t ebo = 0;
 
     // Cached index count so CPU vectors can be freed after GPU upload
-    GLsizei  indexCount = 0;
+    int indexCount = 0;
 
     bool dirty    = true;   // needs re-upload to GPU
     bool uploaded = false;

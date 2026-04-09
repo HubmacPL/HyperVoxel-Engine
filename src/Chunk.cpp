@@ -167,7 +167,7 @@ void ChunkMesh::uploadToGPU() {
 
     glBindVertexArray(0);
 
-    indexCount = static_cast<GLsizei>(indices.size());
+    indexCount = static_cast<int>(indices.size());
     dirty    = false;
     uploaded = true;
 
