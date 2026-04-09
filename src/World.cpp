@@ -80,8 +80,12 @@ void World::setBlock(int wx, int wy, int wz, BlockType type) {
     auto local = worldToLocalPos(wx, wy, wz);
     chunk->setBlock(local.x, local.y, local.z, type);
 
-    // Neighbouring chunks need remeshing if block is on boundary
+    // Flag light as stale — the recomputation runs in the background mesh thread.
+    chunk->markLightDirty();
+
+    // Mark center + boundary neighbours dirty for remeshing
     auto cp = worldToChunkPos(wx, wz);
+    chunk->markDirty();
     if (local.x == 0)          { auto n = getChunk({cp.x-1, cp.y}); if(n) n->markDirty(); }
     if (local.x == CHUNK_W-1)  { auto n = getChunk({cp.x+1, cp.y}); if(n) n->markDirty(); }
     if (local.z == 0)          { auto n = getChunk({cp.x, cp.y-1}); if(n) n->markDirty(); }

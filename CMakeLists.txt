@@ -50,6 +50,7 @@ set(SOURCES
     src/Chunk.cpp
     src/ChunkMesher.cpp
     src/ChunkManager.cpp
+    src/Lighting.cpp
     src/TerrainGenerator.cpp
     src/Renderer.cpp
     src/SkyRenderer.cpp

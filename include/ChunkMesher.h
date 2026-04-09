@@ -50,6 +50,14 @@ struct MeshContext {
     const uint16_t* ny;          // -Y
     const uint16_t* pz;          // +Z
     const uint16_t* nz;          // -Z
+    // Corresponding per-voxel light arrays (1 byte per voxel) — same layout as blocks
+    const uint8_t* centerLight;
+    const uint8_t* pxLight;
+    const uint8_t* nxLight;
+    const uint8_t* pyLight;
+    const uint8_t* nyLight;
+    const uint8_t* pzLight;
+    const uint8_t* nzLight;
 };
 
 class ChunkMesher {
@@ -77,5 +85,6 @@ private:
                          int x, int y, int z,
                          FaceDir dir,
                          BlockType bt,
-                         const std::array<uint8_t, 4>& ao);
+                         const std::array<uint8_t, 4>& ao,
+                         const std::array<uint8_t, 4>& light);
 };

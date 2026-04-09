@@ -15,6 +15,8 @@ in float v_FogFactor;
 in float v_NormalY;
 in float v_Depth;
 in float v_Lighting;
+in float v_Skylight;
+in float v_Blocklight;
 
 out vec4 FragColor;
 
@@ -48,10 +50,22 @@ void main() {
     if (albedo.a < 0.1) discard;
 
     // ── Lighting ──────────────────────────────────────────────────────────────
-    // v_Lighting = diffuse + ambient (from vertex shader)
-    float skyBoost = max(0.0, v_NormalY) * 0.15;
-    float lightVal = (v_Lighting + skyBoost) * v_AO * u_DayNight;
-    lightVal = max(lightVal, 0.05);
+    // v_Skylight  : baked flood-fill skylight [0..1]  (0 = underground/occluded)
+    // v_Blocklight: baked block light [0..1]           (no sources yet → 0)
+    // v_Lighting  : sun directional + ambient (diff + 0.20) baked in vertex shader
+
+    // Extract pure directional component (remove the pre-added ambient 0.20)
+    float diff = max(v_Lighting - 0.20, 0.0);
+
+    // Sky-driven ambient: sky open = bright, underground = dark
+    float indirect = max(v_Skylight, v_Blocklight) * u_DayNight;
+
+    // Directional boost on sun-facing surfaces (gated by skylight so caves stay dark)
+    float direct = diff * v_Skylight * u_DayNight;
+
+    // Combine, apply AO and enforce an absolute dark floor so nothing is pure black
+    float lightVal = clamp((indirect * 0.75 + direct * 0.25 + 0.04) * v_AO, 0.04, 1.5);
+
     vec3 litColor = albedo.rgb * u_SunColor * lightVal;
 
     // ── Fog blend ─────────────────────────────────────────────────────────────

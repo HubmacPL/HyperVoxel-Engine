@@ -122,6 +122,29 @@ public:
     // Returns pointer to flat uint16_t array, valid for lifetime of Chunk
     [[nodiscard]] const uint16_t* rawBlocks() const noexcept { return rawData_.data(); }
 
+    // Raw light data access (1 byte per voxel: low nibble = skylight, high nibble = blocklight)
+    [[nodiscard]] const uint8_t* rawLightData() const noexcept { return lightData_.data(); }
+    [[nodiscard]] uint8_t* rawLightData() noexcept { return lightData_.data(); }
+
+    // Thread-safe snapshot of light data — use in meshing thread to avoid data race
+    [[nodiscard]] std::array<uint8_t, CHUNK_VOL> rawLightDataCopy() const {
+        std::unique_lock lock(blockMutex_);
+        return lightData_;
+    }
+
+    // Reset all skylight data to 0 (before a full recomputation)
+    void resetSkylight() noexcept { lightData_.fill(0); }
+
+    // Simple per-voxel helpers (coords must be in-range)
+    [[nodiscard]] uint8_t getSkylight(int x, int y, int z) const noexcept {
+        return static_cast<uint8_t>(lightData_[blockIndex(x,y,z)] & 0x0Fu);
+    }
+    void setSkylight(int x, int y, int z, uint8_t v) noexcept {
+        int idx = blockIndex(x,y,z);
+        uint8_t high = static_cast<uint8_t>(lightData_[idx] & 0xF0u);
+        lightData_[idx] = static_cast<uint8_t>(high | (v & 0x0Fu));
+    }
+
     // Thread-safe snapshot of block data — use in meshing thread to avoid data race
     [[nodiscard]] std::array<uint16_t, CHUNK_VOL> rawDataCopy() const {
         std::unique_lock lock(blockMutex_);
@@ -151,6 +174,11 @@ public:
     void markDirty() noexcept     { dirty_.store(true, std::memory_order_relaxed); }
     void clearDirty() noexcept    { dirty_.store(false, std::memory_order_relaxed); }
 
+    // ── Light dirty flag (block changed → need full skylight recompute) ───────
+    bool isLightDirty() const noexcept { return lightDirty_.load(std::memory_order_relaxed); }
+    void markLightDirty() noexcept     { lightDirty_.store(true,  std::memory_order_relaxed); }
+    void clearLightDirty() noexcept    { lightDirty_.store(false, std::memory_order_relaxed); }
+
     // ── Heightmap (precomputed during gen, used for AO + tree placement) ──────
     std::array<uint8_t, CHUNK_W * CHUNK_D> heightmap{};
 
@@ -161,10 +189,13 @@ private:
     // AND a palette for RAM-efficient storage / serialization.
     // The rawData_ is the "hot" path; palette_ is used for save/load.
     std::array<uint16_t, CHUNK_VOL> rawData_;  // 128 KB per chunk
+    // Light data: 1 byte per voxel. Low nibble = skylight (0-15), high nibble = blocklight (0-15)
+    std::array<uint8_t, CHUNK_VOL>  lightData_{}; // 64 KB per chunk
     ChunkPalette                    palette_;   // compressed copy
 
     std::atomic<ChunkState>  state_{ChunkState::Empty};
     std::atomic<bool>        dirty_{false};
+    std::atomic<bool>        lightDirty_{false};
     ChunkMesh                mesh_;
     mutable std::mutex       blockMutex_;  // for setBlock from main thread
 };

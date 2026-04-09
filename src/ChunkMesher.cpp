@@ -52,6 +52,40 @@ BlockType ChunkMesher::sampleBlock(const MeshContext& ctx, int x, int y, int z) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// sampleLight — read 4-bit skylight from corresponding light arrays
+// Offsets: x ∈ [-1, CHUNK_W], y ∈ [0, CHUNK_H-1], z ∈ [-1, CHUNK_D]
+// Returns skylight in [0,15]
+// ─────────────────────────────────────────────────────────────────────────────
+static uint8_t sampleLight(const MeshContext& ctx, int x, int y, int z) noexcept {
+    if (y < 0 || y >= CHUNK_H) return 0;
+
+    const uint8_t* data = ctx.centerLight;
+
+    if (x < 0) {
+        if (!ctx.nxLight) return 0;
+        data = ctx.nxLight;
+        x += CHUNK_W;
+    } else if (x >= CHUNK_W) {
+        if (!ctx.pxLight) return 0;
+        data = ctx.pxLight;
+        x -= CHUNK_W;
+    }
+
+    if (z < 0) {
+        if (!ctx.nzLight) return 0;
+        data = ctx.nzLight;
+        z += CHUNK_D;
+    } else if (z >= CHUNK_D) {
+        if (!ctx.pzLight) return 0;
+        data = ctx.pzLight;
+        z -= CHUNK_D;
+    }
+
+    uint8_t packed = data[blockIndex(x, y, z)];
+    return packed & 0x0Fu;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  emitFace — push 4 vertices and 6 indices for one quad
 //
 //  AO-based vertex darkening: flips diagonal to prevent anisotropy artefact.
@@ -62,7 +96,8 @@ void ChunkMesher::emitFace(ChunkMesh& mesh,
                             int x, int y, int z,
                             FaceDir dir,
                             BlockType bt,
-                            const std::array<uint8_t,4>& ao)
+                            const std::array<uint8_t,4>& ao,
+                            const std::array<uint8_t,4>& light)
 {
     auto [tileX, tileY] = getTileCoords(bt, dir);
 
@@ -99,6 +134,9 @@ void ChunkMesher::emitFace(ChunkMesh& mesh,
         v.tileX = tileX;
         v.tileY = tileY;
         v.ao    = ao[c];
+        // Pack skylight (low nibble) and blocklight (high nibble = 0 for now)
+        uint8_t packed = static_cast<uint8_t>(light[c] & 0x0Fu);
+        v.pad[0] = packed;
         // Write explicit normal vector for this face (as floats)
         v.normal = glm::vec3(kFaces[d].normal);
         mesh.vertices.push_back(v);
@@ -208,7 +246,25 @@ ChunkMesh ChunkMesher::buildMesh(const MeshContext& ctx, const glm::ivec2& /*chu
                         ao[c] = computeAO(s1, s2, sc);
                     }
 
-                    emitFace(mesh, x, y, z, static_cast<FaceDir>(f), bt, ao);
+                    // Compute per-corner skylight using smooth sampling in exposed air space.
+                    // We sample 4 positions in the face-normal layer (NOT the AO diagonal),
+                    // so we never read into solid terrain — which was the cause of
+                    // black vertical faces (skylight=0 inside solid blocks).
+                    std::array<uint8_t,4> light{};
+                    for (int c = 0; c < 4; ++c) {
+                        int cu = corners[c][0] * 2 - 1;  // -1 or +1
+                        int cv = corners[c][1] * 2 - 1;
+
+                        // Step 1: move into the air room in front of the face (n offset)
+                        // Step 2: slide to the corner along the two tangent axes
+                        int s0 = sampleLight(ctx, x + n.x,                           y + n.y,                           z + n.z);
+                        int s1 = sampleLight(ctx, x + n.x + tU.x*cu,                 y + n.y + tU.y*cu,                 z + n.z + tU.z*cu);
+                        int s2 = sampleLight(ctx, x + n.x + tV.x*cv,                 y + n.y + tV.y*cv,                 z + n.z + tV.z*cv);
+                        int s3 = sampleLight(ctx, x + n.x + tU.x*cu + tV.x*cv,       y + n.y + tU.y*cu + tV.y*cv,      z + n.z + tU.z*cu + tV.z*cv);
+                        light[c] = static_cast<uint8_t>((s0 + s1 + s2 + s3 + 2) / 4);
+                    }
+
+                    emitFace(mesh, x, y, z, static_cast<FaceDir>(f), bt, ao, light);
                 }
             }
         }

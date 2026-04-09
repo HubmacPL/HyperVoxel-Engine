@@ -159,8 +159,11 @@ private:
 // ─────────────────────────────────────────────────────────────────────────────
 int main() {
     try {
+        std::cout << "[MAIN] Constructing Application\n";
         Application app;
+        std::cout << "[MAIN] Entering run()\n";
         app.run();
+        std::cout << "[MAIN] run() returned\n";
     } catch (const std::exception& e) {
         std::cerr << "[FATAL] " << e.what() << "\n";
         return 1;

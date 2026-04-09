@@ -15,6 +15,7 @@ layout(location = 0) in uvec4 aPos;      // packed position
 layout(location = 1) in uvec4 aUVTile;   // uv + atlas tile coords
 layout(location = 2) in vec3  aNormal;   // explicit normal (float3)
 layout(location = 3) in uint   aAO;      // ambient occlusion [0-3]
+layout(location = 4) in uint   aPackedLight; // packed: low nibble skylight, high nibble blocklight
 
 // ── Uniforms ──────────────────────────────────────────────────────────────────
 uniform mat4  u_MVP;          // model-view-projection
@@ -32,6 +33,8 @@ out float v_FogFactor;  // 0=no fog, 1=fully fogged
 out float v_NormalY;    // used for sky-light approximation
 out float v_Depth;      // view-space depth
 out float v_Lighting;   // per-vertex lighting (diffuse + ambient)
+out float v_Skylight;   // baked skylight [0..1]
+out float v_Blocklight; // baked block light [0..1]
 
 // Note: normals provided per-vertex as `aNormal` (vec3).
 // Directional lighting computed in vertex shader to avoid repeating work.
@@ -69,6 +72,10 @@ void main() {
     float diff = max(dot(n, -normalize(u_SunDir)), 0.0);
     const float ambient = 0.20;
     v_Lighting = diff + ambient;
+
+    // Unpack baked light (low nibble = skylight, high nibble = blocklight)
+    v_Skylight = float(aPackedLight & 15u) / 15.0;
+    v_Blocklight = float((aPackedLight >> 4u) & 15u) / 15.0;
 
     // ── View-space depth for fog ──────────────────────────────────────────────
     v_Depth = -clipPos.z / clipPos.w;

@@ -89,6 +89,7 @@ void ChunkPalette::repack() {
 // ─────────────────────────────────────────────────────────────────────────────
 Chunk::Chunk(glm::ivec2 pos) : chunkPos_(pos) {
     rawData_.fill(static_cast<uint16_t>(BlockType::Air));
+    lightData_.fill(0);
 }
 
 Chunk::~Chunk() {
@@ -164,6 +165,12 @@ void ChunkMesh::uploadToGPU() {
     glEnableVertexAttribArray(3);
     glVertexAttribIPointer(3, 1, GL_UNSIGNED_BYTE, sizeof(ChunkVertex),
                            reinterpret_cast<void*>(8));
+
+    // Attribute 4: packed light (single unsigned byte) at offset 9
+    // Low nibble = skylight (0-15), high nibble = blocklight (0-15)
+    glEnableVertexAttribArray(4);
+    glVertexAttribIPointer(4, 1, GL_UNSIGNED_BYTE, sizeof(ChunkVertex),
+                           reinterpret_cast<void*>(9));
 
     glBindVertexArray(0);
 
