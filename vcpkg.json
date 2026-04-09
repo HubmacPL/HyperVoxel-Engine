@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "minecraft-clone",
+  "version": "0.1.0",
+  "dependencies": [
+    "glfw3",
+    "glew",
+    "glm"
+  ],
+  "builtin-baseline": "66c0373dc7fca549e5803087b9487edfe3aca0a1"
+}

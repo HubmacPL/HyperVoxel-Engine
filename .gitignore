@@ -1,0 +1,30 @@
+# Ignore build artifacts and temporary files
+/build/
+/Debug/
+/Release/
+/x64/
+/bin/
+/obj/
+out.txt
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# vcpkg
+vcpkg_installed/
+
+# Misc
+*.log
+*.cache
+*.tmp

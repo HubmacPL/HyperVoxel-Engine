@@ -1,0 +1,160 @@
+#pragma once
+#include <array>
+#include <vector>
+#include <atomic>
+#include <mutex>
+#include <memory>
+#include <cstdint>
+#include <glm/glm.hpp>
+#include "BlockRegistry.h"
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chunk dimensions
+// ─────────────────────────────────────────────────────────────────────────────
+inline constexpr int CHUNK_W  = 16;   // X
+inline constexpr int CHUNK_H  = 256;  // Y
+inline constexpr int CHUNK_D  = 16;   // Z
+inline constexpr int CHUNK_VOL = CHUNK_W * CHUNK_H * CHUNK_D;
+
+// Flat index: Y is outermost for vertical cache locality during meshing
+// Layout: [y * CHUNK_W * CHUNK_D + z * CHUNK_W + x]
+inline constexpr int blockIndex(int x, int y, int z) noexcept {
+    return y * (CHUNK_W * CHUNK_D) + z * CHUNK_W + x;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chunk Palette — compresses block data when chunk has few unique types
+//
+//  Strategy:
+//    ≤  2 unique types → 1 bit  per block  (32 KB → 512 B)
+//    ≤  4 unique types → 2 bits per block  (1 KB)
+//    ≤ 16 unique types → 4 bits per block  (2 KB)
+//    ≤256 unique types → 8 bits per block  (4 KB)  ← most common
+//    >256 unique types → 16 bits direct    (128 KB) ← fallback
+// ─────────────────────────────────────────────────────────────────────────────
+struct ChunkPalette {
+    std::vector<BlockType>   palette;     // palette index → BlockType
+    std::vector<uint8_t>     data8;       // 8-bit indices (≤256 palette)
+    std::vector<uint16_t>    data16;      // 16-bit direct (>256 palette / fallback)
+    uint8_t                  bitsPerBlock = 8;
+
+    void build(const std::array<BlockType, CHUNK_VOL>& raw);
+    [[nodiscard]] BlockType get(int idx) const noexcept;
+    void set(int idx, BlockType bt);
+    void repack();  // called after many set() operations
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Mesh vertex — 32 bytes, cache-line friendly
+//  Packed data reduces VRAM bandwidth significantly
+// ─────────────────────────────────────────────────────────────────────────────
+struct ChunkVertex {
+    // Position relative to chunk origin (0-15, 0-255, 0-15) → fits in uint8
+    uint8_t  x, y_lo, y_hi, z;   // y split across two bytes (0-255)
+    // UV within atlas tile: 0 or 1 on each axis (corner of 16x16 tile)
+    uint8_t  u, v;
+    uint8_t  tileX, tileY;        // atlas tile coordinates (0-15)
+    // Lighting: ao in [0-3], skyLight in [0-15], blockLight in [0-15]
+    uint8_t  ao;                  // 0=darkest, 3=brightest
+    uint8_t  normal;              // face index 0-5
+    uint8_t  pad[2];              // align to 12 bytes
+};
+static_assert(sizeof(ChunkVertex) == 12, "ChunkVertex must be 12 bytes");
+
+struct ChunkMesh {
+    std::vector<ChunkVertex> vertices;
+    std::vector<uint32_t>    indices;
+
+    // OpenGL handles (0 = not uploaded)
+    uint32_t vao = 0;
+    uint32_t vbo = 0;
+    uint32_t ebo = 0;
+
+    bool dirty    = true;   // needs re-upload to GPU
+    bool uploaded = false;
+
+    void clear() { vertices.clear(); indices.clear(); dirty = true; uploaded = false; }
+
+    // Upload to GPU — must be called from GL thread
+    void uploadToGPU();
+    void freeGPU();
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chunk states (atomic for lock-free reads)
+// ─────────────────────────────────────────────────────────────────────────────
+enum class ChunkState : uint8_t {
+    Empty          = 0,   // no data
+    Generating     = 1,   // terrain gen in progress (background thread)
+    TerrainGenerated = 2, // terrain ready, awaiting decoration
+    Decorated      = 3,   // decoration completed, awaiting remesh
+    NeedsMeshing   = 4,   // terrain/decoration changed, needs mesh rebuild
+    Meshing        = 5,   // mesh being built (background thread)
+    Ready          = 6,   // mesh ready, needs GPU upload
+    Uploaded       = 7,   // on GPU, visible
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Chunk
+// ─────────────────────────────────────────────────────────────────────────────
+class Chunk {
+public:
+    explicit Chunk(glm::ivec2 pos);
+    ~Chunk();
+
+    // Non-copyable, moveable
+    Chunk(const Chunk&) = delete;
+    Chunk& operator=(const Chunk&) = delete;
+    Chunk(Chunk&&) = default;
+    Chunk& operator=(Chunk&&) = default;
+
+    // ── Block access ─────────────────────────────────────────────────────────
+    [[nodiscard]] BlockType getBlock(int x, int y, int z) const noexcept;
+    void setBlock(int x, int y, int z, BlockType type);
+
+    // Raw array access for the mesher (avoids palette overhead in tight loops)
+    // Returns pointer to flat uint16_t array, valid for lifetime of Chunk
+    [[nodiscard]] const uint16_t* rawBlocks() const noexcept { return rawData_.data(); }
+
+    // ── Position ──────────────────────────────────────────────────────────────
+    [[nodiscard]] glm::ivec2 chunkPos()  const noexcept { return chunkPos_; }
+    [[nodiscard]] glm::vec3  worldOrigin() const noexcept {
+        return { chunkPos_.x * CHUNK_W, 0, chunkPos_.y * CHUNK_D };
+    }
+
+    // ── State ─────────────────────────────────────────────────────────────────
+    [[nodiscard]] ChunkState state() const noexcept {
+        return state_.load(std::memory_order_acquire);
+    }
+    void setState(ChunkState s) noexcept {
+        state_.store(s, std::memory_order_release);
+    }
+
+    // ── Mesh ─────────────────────────────────────────────────────────────────
+    ChunkMesh& mesh() noexcept { return mesh_; }
+    const ChunkMesh& mesh() const noexcept { return mesh_; }
+
+    // ── Dirty flag (block modified, needs remesh) ─────────────────────────────
+    bool isDirty() const noexcept { return dirty_.load(std::memory_order_relaxed); }
+    void markDirty() noexcept     { dirty_.store(true, std::memory_order_relaxed); }
+    void clearDirty() noexcept    { dirty_.store(false, std::memory_order_relaxed); }
+
+    // ── Heightmap (precomputed during gen, used for AO + tree placement) ──────
+    std::array<uint8_t, CHUNK_W * CHUNK_D> heightmap{};
+
+private:
+    glm::ivec2               chunkPos_;
+    // ── Block storage ─────────────────────────────────────────────────────────
+    // We keep BOTH a flat uint16_t array (for fast mesher reads)
+    // AND a palette for RAM-efficient storage / serialization.
+    // The rawData_ is the "hot" path; palette_ is used for save/load.
+    std::array<uint16_t, CHUNK_VOL> rawData_;  // 128 KB per chunk
+    ChunkPalette                    palette_;   // compressed copy
+
+    std::atomic<ChunkState>  state_{ChunkState::Empty};
+    std::atomic<bool>        dirty_{false};
+    ChunkMesh                mesh_;
+    mutable std::mutex       blockMutex_;  // for setBlock from main thread
+};
+
+using ChunkPtr = std::shared_ptr<Chunk>;
